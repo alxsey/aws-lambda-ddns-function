@@ -264,7 +264,15 @@ def lambda_handler(event, context):
                     print e
         else:
             print 'No matching zone for %s' % configuration[0]
-
+            
+    # Clean up DynamoDB after deleting records
+    if state != 'running':
+        table.delete_item(
+            Key={
+                'InstanceId': instance_id
+            }
+        )
+        
 def create_table(table_name):
     dynamodb_client.create_table(
             TableName=table_name,
