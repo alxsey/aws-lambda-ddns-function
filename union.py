@@ -4,7 +4,7 @@ import re
 import uuid
 import time
 import random
-import socket
+import sys
 from datetime import datetime
 
 print('Loading function ' + datetime.now().time().isoformat())
@@ -20,6 +20,12 @@ def lambda_handler(event, context):
     """ Check to see whether a DynamoDB table already exists.  If not, create it.  This table is used to keep a record of
     assets that have been created along with their attributes.  This is necessary because when you terminate it
     its attributes are no longer available, so they have to be fetched from the table."""
+    global table, asset_id, asset, event_state, region
+    asset_id = ''
+    event_state = ''
+    asset = {}
+    region = ''
+    
     tables = dynamodb_client.list_tables()
     if 'DDNS' in tables['TableNames']:
         print 'DynamoDB table already exists'
@@ -31,20 +37,19 @@ def lambda_handler(event, context):
 
     # Check actual event type
     # And get the asset id, region, and tag collection
-    if event['source'] == "aws.ec2" then:
-      set_instance_vars()
-    elif event['source'] == "aws.elasticloadbalancing":
+    if event['source'] == 'aws.ec2':
+      set_instance_vars(event)
+    elif event['source'] == 'aws.elasticloadbalancing':
       try:
-        assetname = event['detail']['requestParameters']['loadBalancerName']
-        set_lbv1_vars()
+        set_lbv1_vars(event)
       except:
-        set_lbv2_vars()
+        set_lbv2_vars(event)
     else:
       print 'Unexpected event source %s' % event['source']
       return
 
     if asset['extras']['type'] == 'instance':
-      # Get instance attributes
+      # Asset is instance, thus has private IP. Get instance attributes
       private_ip = asset['extras']['private_ip']
       try:
           public_ip = asset['extras']['public_ip']
@@ -60,24 +65,28 @@ def lambda_handler(event, context):
       reversed_domain_prefix = get_reversed_domain_prefix(subnet_mask, private_ip)
       reversed_domain_prefix = reverse_list(reversed_domain_prefix)
 
-      # Set the reverse lookup zone
+      # Set the reverse lookup zone for instances only
       reversed_lookup_zone = reversed_domain_prefix + 'in-addr.arpa.'
       print 'The reverse lookup zone for this instance is:', reversed_lookup_zone
+    else:
+      reversed_lookup_zone = ''
 
     # Get VPC id
-    vpc_id = asset['extras']['vpc_id'])
+    vpc_id = asset['extras']['vpc_id']
     vpc = ec2.Vpc(vpc_id)
     # Get private and public DNS names
+    private_host_name = ''
+    public_host_name = ''
     try:
       private_dns_name = asset['extras']['private_dns_name']
       private_host_name = private_dns_name.split('.')[0]
     except BaseException as e:
-        print 'Asset has no private DNS host name', e
+        print 'Asset '+str(asset['extras']['type'])+' has no private DNS host name', e
     try:
       public_dns_name = asset['extras']['public_dns_name']
       public_host_name = public_dns_name.split('.')[0]
     except BaseException as e:
-        print 'Asset has no public DNS host name', e
+        print 'Asset '+str(asset['extras']['type'])+' has no public DNS host name', e
     
     # Are DNS Hostnames and DNS Support enabled?
     if is_dns_hostnames_enabled(vpc):
@@ -92,9 +101,9 @@ def lambda_handler(event, context):
     # Create the public and private hosted zone collections.  These are collections of zones in Route 53.
     hosted_zones = route53.list_hosted_zones()
     private_hosted_zones = filter(lambda x: x['Config']['PrivateZone'] is True, hosted_zones['HostedZones'])
-    private_hosted_zone_collection = map(lambda x: x['Name'], private_hosted_zones)
+    private_hosted_zones_collection = map(lambda x: {'Name': x['Name'], 'Id': str.split(str(x['Id']),'/')[2]}, private_hosted_zones)
     public_hosted_zones = filter(lambda x: x['Config']['PrivateZone'] is False, hosted_zones['HostedZones'])
-    public_hosted_zones_collection = map(lambda x: x['Name'], public_hosted_zones)
+    public_hosted_zones_collection = map(lambda x: {'Name': x['Name'], 'Id': str.split(str(x['Id']),'/')[2]}, public_hosted_zones)
     # Check to see whether a reverse lookup zone for the instance already exists.  If it does, check to see whether
     # the reverse lookup zone is associated with the instance's VPC.  If it isn't create the association.  You don't
     # need to do this when you create the reverse lookup zone because the association is done automatically.
@@ -112,8 +121,8 @@ def lambda_handler(event, context):
                 print e
     else:
         print 'No matching reverse lookup zone'
-        # create private hosted zone for reverse lookups
-        if event_state == 'create':
+        # create private hosted zone for reverse lookups if it is needed
+        if event_state == 'create' and reversed_lookup_zone != '':
             create_reverse_lookup_zone(vpc_id, reversed_domain_prefix, region)
             reverse_lookup_zone_id = get_zone_id(reversed_lookup_zone)
     # Wait a random amount of time.  This is a poor-mans back-off if a lot of instances are launched all at once.
@@ -124,46 +133,46 @@ def lambda_handler(event, context):
     for tag in asset['tags']:
         if 'ZONE' in tag.get('Key',{}).lstrip().upper():
             if is_valid_hostname(tag.get('Value')):
-                if tag.get('Value').lstrip().lower() in private_hosted_zone_collection:
+                private_zone_record = next(( zone for zone in private_hosted_zones_collection if zone['Name'].lstrip().lower() == tag.get('Value').lstrip().lower()), False)
+                public_zone_record = next(( zone for zone in public_hosted_zones_collection if zone['Name'].lstrip().lower() == tag.get('Value').lstrip().lower()), False)
+                if private_zone_record and private_host_name != '':
                     print 'Private zone found:', tag.get('Value')
-                    private_hosted_zone_name = tag.get('Value').lstrip().lower()
-                    private_hosted_zone_id = get_zone_id(private_hosted_zone_name)
-                    private_hosted_zone_properties = get_hosted_zone_properties(private_hosted_zone_id)
+                    private_hosted_zone_properties = get_hosted_zone_properties(private_zone_record['Id'])
                     if event_state == 'create':
                         if vpc_id in map(lambda x: x['VPCId'], private_hosted_zone_properties['VPCs']):
-                            print 'Private hosted zone %s is associated with VPC %s' % (private_hosted_zone_id, vpc_id)
+                            print 'Private hosted zone %s is associated with VPC %s' % (private_zone_record['Id'], vpc_id)
                         else:
-                            print 'Associating zone %s with VPC %s' % (private_hosted_zone_id, vpc_id)
+                            print 'Associating zone %s with VPC %s' % (private_zone_record['Id'], vpc_id)
                             try:
-                                associate_zone(private_hosted_zone_id, region, vpc_id)
+                                associate_zone(private_zone_record['Id'], region, vpc_id)
                             except BaseException as e:
                                 print 'You cannot create an association with a VPC with an overlapping subdomain.\n', e
-                                exit()
+                                sys.exit()
                         try:
-                            create_resource_record(private_hosted_zone_id, private_host_name, private_hosted_zone_name, 'A', private_ip)
+                            create_resource_record(private_zone_record['Id'], private_host_name, private_zone_record['Name'], 'A', private_ip)
                             create_resource_record(reverse_lookup_zone_id, reversed_ip_address, 'in-addr.arpa', 'PTR', private_dns_name)
                         except BaseException as e:
                             print e
                     else:
                         try:
-                            delete_resource_record(private_hosted_zone_id, private_host_name, private_hosted_zone_name, 'A', private_ip)
+                            delete_resource_record(private_zone_record['Id'], private_host_name, private_zone_record['Name'], 'A', private_ip)
                             delete_resource_record(reverse_lookup_zone_id, reversed_ip_address, 'in-addr.arpa', 'PTR', private_dns_name)
                         except BaseException as e:
                             print e
                     # create PTR record
-                elif tag.get('Value').lstrip().lower() in public_hosted_zones_collection:
+                elif public_zone_record and public_host_name != '':
                     print 'Public zone found', tag.get('Value')
                     public_hosted_zone_name = tag.get('Value').lstrip().lower()
                     public_hosted_zone_id = get_zone_id(public_hosted_zone_name)
                     # create A record in public zone
                     if event_state =='create':
                         try:
-                            create_resource_record(public_hosted_zone_id, public_host_name, public_hosted_zone_name, 'A', public_ip)
+                            create_resource_record(public_zone_record['Id'], public_host_name, public_zone_record['Name'], 'A', public_ip)
                         except BaseException as e:
                             print e
                     else:
                         try:
-                            delete_resource_record(public_hosted_zone_id, public_host_name, public_hosted_zone_name, 'A', public_ip)
+                            delete_resource_record(public_zone_record['Id'], public_host_name, public_zone_record['Name'], 'A', public_ip)
                         except BaseException as e:
                             print e
                 else:
@@ -178,34 +187,35 @@ def lambda_handler(event, context):
                 cname = tag.get('Value').lstrip().lower()
                 cname_host_name = cname.split('.')[0]
                 cname_domain_suffix = cname[cname.find('.')+1:]
-                cname_domain_suffix_id = get_zone_id(cname_domain_suffix)
-                for cname_private_hosted_zone in private_hosted_zone_collection:
-                    cname_private_hosted_zone_id = get_zone_id(cname_private_hosted_zone)
-                    if cname_domain_suffix_id == cname_private_hosted_zone_id:
-                        if cname.endswith(cname_private_hosted_zone):
-                            #create CNAME record in private zone
-                            if event_state == 'create':
-                                try:
-                                    create_resource_record(cname_private_hosted_zone_id, cname_host_name, cname_private_hosted_zone, 'CNAME', private_dns_name)
-                                except BaseException as e:
-                                    print e
-                            else:
-                                try:
-                                    delete_resource_record(cname_private_hosted_zone_id, cname_host_name, cname_private_hosted_zone, 'CNAME', private_dns_name)
-                                except BaseException as e:
-                                    print e
+                if cname_domain_suffix[-1] != '.':
+                  cname_domain_suffix = cname_domain_suffix + '.'
+                cname_private_zone_record = next(( zone for zone in private_hosted_zones_collection if zone['Name'].lstrip().lower() == cname_domain_suffix), False)
+                cname_public_zone_record = next(( zone for zone in public_hosted_zones_collection if cname.endswith(zone['Name'])), False)
+                if cname_private_zone_record:
+                    #create CNAME record in private zone
+                    if event_state == 'create':
+                        try:
+                            create_resource_record(cname_private_zone_record['Id'], cname_host_name, cname_private_zone_record['Name'], 'CNAME', private_dns_name)
+                        except BaseException as e:
+                            print e
+                    else:
+                        try:
+                            delete_resource_record(cname_private_zone_record['Id'], cname_host_name, cname_private_zone_record['Name'], 'CNAME', private_dns_name)
+                        except BaseException as e:
+                            print e
+# Next 3 lines could be dropped in favour of cname_public_zone_record 
                 for cname_public_hosted_zone in public_hosted_zones_collection:
-                    if cname.endswith(cname_public_hosted_zone):
-                        cname_public_hosted_zone_id = get_zone_id(cname_public_hosted_zone)
+                    if cname.endswith(cname_public_hosted_zone['Name']):
+                        cname_public_hosted_zone_id = cname_public_hosted_zone['Id']
                         #create CNAME record in public zone
                         if event_state == 'create':
                             try:
-                                create_resource_record(cname_public_hosted_zone_id, cname_host_name, cname_public_hosted_zone, 'CNAME', public_dns_name)
+                                create_resource_record(cname_public_hosted_zone_id, cname_host_name, cname_public_hosted_zone['Name'], 'CNAME', public_dns_name)
                             except BaseException as e:
                                 print e
                         else:
                             try:
-                                delete_resource_record(cname_public_hosted_zone_id, cname_host_name, cname_public_hosted_zone, 'CNAME', public_dns_name)
+                                delete_resource_record(cname_public_hosted_zone_id, cname_host_name, cname_public_hosted_zone['Name'], 'CNAME', public_dns_name)
                             except BaseException as e:
                                 print e
     # Is there a DHCP option set?
@@ -215,36 +225,35 @@ def lambda_handler(event, context):
         dhcp_configurations = get_dhcp_configurations(dhcp_options_id)
     except BaseException as e:
         print 'No DHCP option set assigned to this VPC\n', e
-        exit()
+        sys.exit()
     # Look to see whether there's a DHCP option set assigned to the VPC.  If there is, use the value of the domain name
     # to create resource records in the appropriate Route 53 private hosted zone. This will also check to see whether
     # there's an association between the instance's VPC and the private hosted zone.  If there isn't, it will create it.
     for configuration in dhcp_configurations:
-        if configuration[0] in private_hosted_zone_collection:
-            private_hosted_zone_name = configuration[0]
-            print 'Private zone found %s' % private_hosted_zone_name
+        private_zone_record = next(( zone for zone in private_hosted_zones_collection if zone['Name'].lstrip().lower() == configuration[0].lstrip().lower()), False)
+        if private_zone_record:
+            print 'Private zone found %s' % private_zone_record['Name']
             # TODO need a way to prevent overlapping subdomains
-            private_hosted_zone_id = get_zone_id(private_hosted_zone_name)
-            private_hosted_zone_properties = get_hosted_zone_properties(private_hosted_zone_id)
+            private_hosted_zone_properties = get_hosted_zone_properties(private_zone_record['Id'])
             # create A records and PTR records
             if event_state == 'create':
                 if vpc_id in map(lambda x: x['VPCId'], private_hosted_zone_properties['VPCs']):
-                    print 'Private hosted zone %s is associated with VPC %s' % (private_hosted_zone_id, vpc_id)
+                    print 'Private hosted zone %s is associated with VPC %s' % (private_zone_record['Id'], vpc_id)
                 else:
-                    print 'Associating zone %s with VPC %s' % (private_hosted_zone_id, vpc_id)
+                    print 'Associating zone %s with VPC %s' % (private_zone_record['Id'], vpc_id)
                     try:
-                        associate_zone(private_hosted_zone_id, region,vpc_id)
+                        associate_zone(private_zone_record['Id'], region,vpc_id)
                     except BaseException as e:
                         print 'You cannot create an association with a VPC with an overlapping subdomain.\n', e
-                        exit()
+                        sys.exit()
                 try:
-                    create_resource_record(private_hosted_zone_id, private_host_name, private_hosted_zone_name, 'A', private_ip)
+                    create_resource_record(private_zone_record['Id'], private_host_name, private_zone_record['Name'], 'A', private_ip)
                     create_resource_record(reverse_lookup_zone_id, reversed_ip_address, 'in-addr.arpa', 'PTR', private_dns_name)
                 except BaseException as e:
                     print e
             else:
                 try:
-                    delete_resource_record(private_hosted_zone_id, private_host_name, private_hosted_zone_name, 'A', private_ip)
+                    delete_resource_record(private_zone_record['Id'], private_host_name, private_zone_record['Name'], 'A', private_ip)
                     delete_resource_record(reverse_lookup_zone_id, reversed_ip_address, 'in-addr.arpa', 'PTR', private_dns_name)
                 except BaseException as e:
                     print e
@@ -282,7 +291,7 @@ def create_table(table_name):
     table = dynamodb_resource.Table(table_name)
     table.wait_until_exists()
 
-def set_instance_vars():
+def set_instance_vars(event):
   global asset_id, asset, event_state
 
   asset_id = event['detail']['instance-id'] 
@@ -314,9 +323,9 @@ def set_instance_vars():
   else:
     event_state = 'destroy'
     # Fetch item from DynamoDB
-    db_fetch_asset(asset_id, asset, table)
+    asset = db_fetch_asset(asset_id, table)
 
-def set_lbv1_vars():
+def set_lbv1_vars(event):
   global asset_id, asset, event_state
 
   asset_id = event['detail']['requestParameters']['loadBalancerName']
@@ -346,9 +355,9 @@ def set_lbv1_vars():
     db_put_asset(asset_id, asset, table)
   else:
     event_state = 'destroy'
-    db_fetch_asset(asset_id, asset, table)
+    asset = db_fetch_asset(asset_id, table)
 
-def set_lbv2_vars():
+def set_lbv2_vars(event):
   global asset_id, asset, event_state
 
   if event['detail']['eventName'] == 'CreateLoadBalancer':
@@ -379,7 +388,7 @@ def set_lbv2_vars():
   else:
     event_state='destroy'
     asset_id = event['detail']['requestParameters']['loadBalancerArn']
-    db_fetch_asset(asset_id, asset, table)
+    asset = db_fetch_asset(asset_id, table)
 
 def db_put_asset(asset_id, asset, table):
   # Remove null values from the response.  You cannot save a dict/JSON document in DynamoDB if it contains null
@@ -394,24 +403,28 @@ def db_put_asset(asset_id, asset, table):
           'AssetAttributes': asset_attributes
       }
   )
+  region = asset['extras']['region']
 
-def db_fetch_asset(asset_id, asset, table):
+def db_fetch_asset(asset_id, table):
   # Fetch item from DynamoDB
   asset = table.get_item(
   Key={
-      'InstanceId': asset_id
+      'AssetId': asset_id
   },
   AttributesToGet=[
-      'InstanceAttributes'
+      'AssetAttributes'
       ]
   )
-  asset = asset['Item']['InstanceAttributes']
+  asset = asset['Item']['AssetAttributes']
   # Make sure that empty elements are initialized
   try:
     tags = asset['tags']
   except:
     tags = []
   asset['tags'] = tags
+  region = asset['extras']['region']
+
+  return asset
 
 def create_resource_record(zone_id, host_name, hosted_zone_name, type, value):
     """This function creates resource records in the hosted zone passed by the calling function."""
@@ -509,7 +522,7 @@ def reverse_list(list):
         return reversed_list
     else:
         print 'Not a valid ip'
-        exit()
+        sys.exit()
 
 def get_reversed_domain_prefix(subnet_mask, private_ip):
     """Uses the mask to get the zone prefix for the reverse lookup zone"""
