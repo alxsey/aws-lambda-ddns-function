@@ -59,7 +59,10 @@ The policy includes **ec2:Describe permission**, required for the function to ob
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Action": "ec2:Describe*",
+    "Action": [
+      "ec2:Describe*",
+      "elasticloadbalancing:Describe*"
+    ],
     "Resource": "*"
   }, {
     "Effect": "Allow",
@@ -155,16 +158,19 @@ aws lambda create-function --function-name ddns_lambda --runtime python2.7 --rol
 In this step, you create the CloudWatch Events rule that triggers the Lambda function whenever CloudWatch detects a change to the state of an EC2 instance.  You configure the rule to fire when any EC2 instance state changes to “running”, “shutting down”, or “stopped”.  Use the **aws events put-rule** command to create the rule and set the Lambda function as the execution target:
 ```
 aws events put-rule --event-pattern "{\"source\":[\"aws.ec2\"],\"detail-type\":[\"EC2 Instance State-change Notification\"],\"detail\":{\"state\":[\"running\",\"shutting-down\",\"stopped\"]}}" --state ENABLED --name ec2_lambda_ddns_rule
+aws events put-rule --event-pattern "{\"account\": [\"674511019039\"], \"detail\": {\"eventName\": [\"CreateLoadBalancer\", \"DeleteLoadBalancer\"], \"eventSource\": [\"elasticloadbalancing.amazonaws.com\"]}, \"detail-type\": [\"AWS API Call via CloudTrail\"]}" --state ENABLED --name lb_lambda_ddns_rule
 ```
 The output of the command returns the ARN to the newly created CloudWatch Events rule, named **ec2\_lambda\_ddns\_rule**. Save the ARN, as you will need it to associate the rule with the Lambda function and to set the appropriate Lambda permissions.
 
 Next, set the target of the rule to the Lambda function.  Note that the **--targets** input parameter requires that you include a unique identifier for the **Id** target.  You also need to update the command to use the ARN of the Lambda function that you created previously.
 ```
 aws events put-targets --rule ec2_lambda_ddns_rule --targets Id=id123456789012,Arn=<enter-your-lambda-function-arn-here>
+aws events put-targets --rule lb_lambda_ddns_rule --targets Id=id123456789012,Arn=<enter-your-lambda-function-arn-here>
 ```
 Next, you add the permissions required for the CloudWatch Events rule to execute the Lambda function.   Note that you need to provide a unique value for the **--statement-id** input parameter.  You also need to provide the ARN of the CloudWatch Events rule you created earlier.
 ```
-aws lambda add-permission --function-name ddns_lambda --statement-id 45 --action lambda:InvokeFunction --principal events.amazonaws.com --source-arn <enter-your-cloudwatch-events-rule-arn-here>
+aws lambda add-permission --function-name ddns_lambda --statement-id 45 --action lambda:InvokeFunction --principal events.amazonaws.com --source-arn <enter-your-ec2-cloudwatch-events-rule-arn-here>
+aws lambda add-permission --function-name ddns_lambda --statement-id 46 --action lambda:InvokeFunction --principal events.amazonaws.com --source-arn <enter-your-lb-cloudwatch-events-rule-arn-here>
 ```
 ##### Step 4 – Create the private hosted zone in Route 53
 
