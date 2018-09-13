@@ -53,13 +53,16 @@ In this step, you will use the AWS Command Line Interface (AWS CLI) to create th
 
 _ddns-policy.json_
 
-The policy includes **ec2:Describe permission**, required for the function to obtain the EC2 instance’s attributes, including the private IP address, public IP address, and DNS hostname.   The policy also includes DynamoDB and Route 53 full access which the function uses to create the DynamoDB table and update the Route 53 DNS records.  The policy also allows the function to create log groups and log events.
+The policy includes **ec2:Describe permission** as well as **elasticloadbalancing:Describe permission**, required for the function to obtain the EC2 instance or LoadBalancer’s attributes, including the private IP address for EC2, public IP address, and DNS hostname.   The policy also includes DynamoDB and Route 53 full access which the function uses to create the DynamoDB table and update the Route 53 DNS records.  The policy also allows the function to create log groups and log events.
 ```JSON
 {
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Action": "ec2:Describe*",
+    "Action": [
+      "ec2:Describe*",
+      "elasticloadbalancing:Describe*"
+    ],
     "Resource": "*"
   }, {
     "Effect": "Allow",
@@ -124,15 +127,15 @@ The code performs the following:
 
 -	Checks to see whether the “DDNS” table exists in DynamoDB and creates the table if it does not. This table is used to keep a record of instances that have been created along with their attributes. It’s necessary to persist the instance attributes in a table because once an EC2 instance is terminated, its attributes are no longer available to be queried via the EC2 API. Instead, they must be fetched from the table.
 
--	Queries the event data to determine the instance's state. If the state is “running”, the function queries the EC2 API for the data it will need to update DNS. If the state is anything else, e.g. "stopped" or "terminated", it will retrieve the necessary information from the “DDNS” DynamoDB table.
+-	Queries the event data to determine the instance's state. If the state is “running”, the function queries the EC2 API for the data it will need to update DNS. If the state is anything else, e.g. "stopped" or "terminated", it will retrieve the necessary information from the “DDNS” DynamoDB table. For LoadBalancers event is somewhat different. It is single event that comes from "elasticloadbalancing.amazonaws.com", but detail of it provide "CreateLoadBalancer" or "DeleteLoadBalancer" specifics.
 
 -	Verifies that “DNS resolution” and “DNS hostnames” are enabled for the VPC, as these are required in order to use Route 53 for private name resolution.  The function then checks whether a reverse lookup zone for the instance already exists.  If it does, it checks to see whether the reverse lookup zone is associated with the instance's VPC.  If it isn't, it creates the association.  This association is necessary in order for the VPC to use Route 53 zone for private name resolution.
 
--	Checks the EC2 instance’s tags for the CNAME and ZONE tags.  If the ZONE tag is found, the function creates A and PTR records in the specified zone.  If the CNAME tag is found, the function creates a CNAME record in the specified zone.
+-	Checks the EC2 instance or LoadBalancer’s tags for the CNAME and ZONE tags.  For EC2, if the ZONE tag is found, the function creates A and PTR records in the specified zone.  If the CNAME tag is found, the function creates a CNAME record in the specified zone.
 
 -	Verifies whether there's a DHCP option set assigned to the VPC.  If there is, it uses the value of the domain name to create resource records in the appropriate Route 53 private hosted zone.  The function also checks to see whether there's an association between the instance's VPC and the private hosted zone.  If there isn't, it creates it.
 
--	Deletes the required DNS resource records if the state of the EC2 instance changes to “shutting down” or “stopped”.
+-	Deletes the required DNS resource records if the state of the EC2 instance changes to “shutting down” or “stopped” or LoadBalancer sends "DeleteLoadBalancer" event.
 
 Use the AWS CLI to create the Lambda function:
 
@@ -152,19 +155,22 @@ aws lambda create-function --function-name ddns_lambda --runtime python2.7 --rol
 
 ##### Step 3 – Create the CloudWatch Events Rule
 
-In this step, you create the CloudWatch Events rule that triggers the Lambda function whenever CloudWatch detects a change to the state of an EC2 instance.  You configure the rule to fire when any EC2 instance state changes to “running”, “shutting down”, or “stopped”.  Use the **aws events put-rule** command to create the rule and set the Lambda function as the execution target:
+In this step, you create the CloudWatch Events rules. One that triggers the Lambda function whenever CloudWatch detects a change to the state of an EC2 instance, and second for LoadBalancer.  You configure the rule to fire when any EC2 instance or LoadBalancer state changes.  Use the **aws events put-rule** command to create the rule and set the Lambda function as the execution target:
 ```
 aws events put-rule --event-pattern "{\"source\":[\"aws.ec2\"],\"detail-type\":[\"EC2 Instance State-change Notification\"],\"detail\":{\"state\":[\"running\",\"shutting-down\",\"stopped\"]}}" --state ENABLED --name ec2_lambda_ddns_rule
+aws events put-rule --event-pattern "{\"account\": [\"674511019039\"], \"detail\": {\"eventName\": [\"CreateLoadBalancer\", \"DeleteLoadBalancer\"], \"eventSource\": [\"elasticloadbalancing.amazonaws.com\"]}, \"detail-type\": [\"AWS API Call via CloudTrail\"]}" --state ENABLED --name lb_lambda_ddns_rule
 ```
-The output of the command returns the ARN to the newly created CloudWatch Events rule, named **ec2\_lambda\_ddns\_rule**. Save the ARN, as you will need it to associate the rule with the Lambda function and to set the appropriate Lambda permissions.
+The output of the commands returns the ARNs to the newly created CloudWatch Events rule, named **ec2\_lambda\_ddns\_rule** and **lb\_lambda\_ddns\_rule**. Save the ARNs, as you will need it to associate the rule with the Lambda function and to set the appropriate Lambda permissions.
 
-Next, set the target of the rule to the Lambda function.  Note that the **--targets** input parameter requires that you include a unique identifier for the **Id** target.  You also need to update the command to use the ARN of the Lambda function that you created previously.
+Next, set the target of the rules to the Lambda function.  Note that the **--targets** input parameter requires that you include a unique identifier for the **Id** target.  You also need to update the command to use the ARN of the Lambda function that you created previously.
 ```
 aws events put-targets --rule ec2_lambda_ddns_rule --targets Id=id123456789012,Arn=<enter-your-lambda-function-arn-here>
+aws events put-targets --rule lb_lambda_ddns_rule --targets Id=id123456789012,Arn=<enter-your-lambda-function-arn-here>
 ```
-Next, you add the permissions required for the CloudWatch Events rule to execute the Lambda function.   Note that you need to provide a unique value for the **--statement-id** input parameter.  You also need to provide the ARN of the CloudWatch Events rule you created earlier.
+Next, you add the permissions required for the CloudWatch Events rules to execute the Lambda function.   Note that you need to provide a unique value for the **--statement-id** input parameter for each permission.  You also need to provide respective ARNs of the CloudWatch Events rules you created earlier.
 ```
-aws lambda add-permission --function-name ddns_lambda --statement-id 45 --action lambda:InvokeFunction --principal events.amazonaws.com --source-arn <enter-your-cloudwatch-events-rule-arn-here>
+aws lambda add-permission --function-name ddns_lambda --statement-id 45 --action lambda:InvokeFunction --principal events.amazonaws.com --source-arn <enter-your-ec2-cloudwatch-events-rule-arn-here>
+aws lambda add-permission --function-name ddns_lambda --statement-id 46 --action lambda:InvokeFunction --principal events.amazonaws.com --source-arn <enter-your-lb-cloudwatch-events-rule-arn-here>
 ```
 ##### Step 4 – Create the private hosted zone in Route 53
 
