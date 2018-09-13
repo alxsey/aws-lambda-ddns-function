@@ -192,7 +192,7 @@ In this step, you create a new DHCP options set, and set the domain to be that o
 
 In this step, you launch an EC2 instance and verify that the function executed successfully.
 
-As mentioned previously, the Lambda function looks for the ZONE or CNAME tags associated with the EC2 instance.  If you specify these tags when you launch the instance, you have to include a _trailing dot_.  In this example, the ZONE tag would be set to "ddnslambda.com**.**" and the CNAME tag could be set to "test.ddnslambda.com**.**".
+As mentioned previously, the Lambda function looks for the ZONE or CNAME tags associated with the EC2 instance.  If you specify these tags when you launch the instance, you have to include a _trailing dot_.  In this example, the ZONE tag would be set to "ddnslambda.com**.** " and the CNAME tag could be set to "test.ddnslambda.com**.** ".
 
 Within split-horizon case - not using trailing dot will not put CNAME record in the Public zone, yet still will create one in Private.
 With trailing **.** CNAME records will respectively created in both Public (pointting to public DNS name) and Private - pointing to
