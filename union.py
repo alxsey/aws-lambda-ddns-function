@@ -99,6 +99,7 @@ def lambda_handler(event, context):
         print 'DNS support disabled for %s.  You have to enabled DNS support to use Route 53 private hosted zones.' % vpc_id
 
     # Create the public and private hosted zone collections.  These are collections of zones in Route 53.
+    region = asset['extras']['region']
     hosted_zones = route53.list_hosted_zones()
     private_hosted_zones = filter(lambda x: x['Config']['PrivateZone'] is True, hosted_zones['HostedZones'])
     private_hosted_zones_collection = map(lambda x: {'Name': x['Name'], 'Id': str.split(str(x['Id']),'/')[2]}, private_hosted_zones)
